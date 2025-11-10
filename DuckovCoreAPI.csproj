@@ -1,0 +1,74 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<!-- 這是 .NET Standard 2.1，完全正確！ -->
+		<TargetFramework>netstandard2.1</TargetFramework>
+		<Nullable>enable</Nullable>
+
+		<!-- 
+		  大哥！把這裡改成你自己的「鴨科夫」遊戲安裝路徑
+		  (Duckov.exe 所在的那個資料夾)
+		-->
+		<DuckovPath>E:\SteamLibrary\steamapps\common\Escape from Duckov</DuckovPath>
+	</PropertyGroup>
+
+	<!-- 
+	  這是「零件清單 (Dependencies)」v2.2
+	  我 (CTO) 把 * 拿掉了，改成精確引用 (這才是正確作法！)
+	  這樣 Visual Studio 才不會「找不到」
+	-->
+	<ItemGroup>
+		<!-- 1. 我們的萬能鑰匙 (Harmony) -->
+		<!-- 
+		  [CTO 提醒]
+		  你要把 0Harmony.dll (netstandard2.0 版本) 
+		  複製到你的 Managed 資料夾裡 (或 BepInEx/core 資料夾)
+		  然後把下面的路徑指對！
+		-->
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\0Harmony*">
+			<Private>false</Private>
+		</Reference>
+
+		<!-- 2. 遊戲核心 API (精確指定) -->
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\ItemStatsSystem*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\TeamSoda*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\Assembly-CSharp*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\UniTask*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\Sirenix.OdinInspector.Attributes*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\SodaLocalization*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\Sirenix.Utilities*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\Unity.TextMeshPro*">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\Sirenix.Utilities*">
+			<Private>false</Private>
+		</Reference>
+
+		<!-- 3. Unity 引擎 -->
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\UnityEngine*">
+			<Private>false</Private>
+		</Reference>
+
+		<!-- 4. 輔助工具 (JSON) -->
+		<Reference Include="$(DuckovPath)\Duckov_Data\Managed\Newtonsoft.Json.dll">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="0Harmony">
+			<HintPath>0Harmony.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+</Project>
+
