@@ -43,6 +43,9 @@ DuckovCoreAPI.ModBehaviour.IsStatsEffectsReady(): 屬性/效果資料庫
 範例程式碼
 
 強烈建議使用 Coroutine (協程) 在背景等待，避免卡住遊戲。
+範例程式碼
+
+強烈建議使用 Coroutine (協程) 在背景等待，避免卡住遊戲。
 
 // 範例：如何在背景等待 API 並抓取資料
 private IEnumerator WaitForAPI_Coroutine(Item item, TextMeshProUGUI textInstance)
