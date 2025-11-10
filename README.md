@@ -44,29 +44,30 @@ DuckovCoreAPI.ModBehaviour.IsStatsEffectsReady(): 屬性/效果資料庫
 
 強烈建議使用 Coroutine (協程) 在背景等待，避免卡住遊戲。
 
-// 範例：如何在背景等待 API 並抓取資料
-private IEnumerator WaitForAPI_Coroutine(Item item, TextMeshProUGUI textInstance)
-{
-    // 1. 檢查 API 是否好了？
-    // (我們在這裡等待物品資料庫)
-    while (!DuckovCoreAPI.ModBehaviour.IsDatabaseReady())
-    {
-        // API 沒好，先顯示提示
-        textInstance.text = "<color=#808080>來源: 正在掃描...</color>";
-        // 等待 0.5 秒再檢查一次
-        yield return new WaitForSeconds(0.5f);
-    }
+        // 範例：如何在背景等待 API 並抓取資料
+    
+        private IEnumerator WaitForAPI_Coroutine(Item item, TextMeshProUGUI textInstance)
 
-    // 2. API 好了，執行抓取
-    // 使用 GetEntry() 搭配 TypeID 查詢
-    if (DuckovCoreAPI.ModBehaviour.GetEntry(item.TypeID, out var entry))
-    {
-        // 抓到了！ (entry.BronzeID 就是 Mod 顯示名稱)
-        textInstance.text = $"<color=#80E0FF>來源: {entry.BronzeID}</color>";
+        // 1. 檢查 API 是否好了？
+        // (我們在這裡等待物品資料庫)
+        while (!DuckovCoreAPI.ModBehaviour.IsDatabaseReady())
+        {
+            // API 沒好，先顯示提示
+            textInstance.text = "<color=#808080>來源: 正在掃描...</color>";
+            // 等待 0.5 秒再檢查一次
+            yield return new WaitForSeconds(0.5f);
+        }
+
+        // 2. API 好了，執行抓取
+        // 使用 GetEntry() 搭配 TypeID 查詢
+        if (DuckovCoreAPI.ModBehaviour.GetEntry(item.TypeID, out var entry))
+        {
+            // 抓到了！ (entry.BronzeID 就是 Mod 顯示名稱)
+            textInstance.text = $"<color=#80E0FF>來源: {entry.BronzeID}</color>";
+        }
+        else
+        {
+            // 帳本裡沒有這個物品
+            textInstance.text = "<color=#FF6060>來源: 未知</color>";
+        }    
     }
-    else
-    {
-        // 帳本裡沒有這個物品
-        textInstance.text = "<color=#FF6060>來源: 未知</color>";
-    }
-}
