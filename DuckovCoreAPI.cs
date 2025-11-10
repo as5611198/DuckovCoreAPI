@@ -1,10 +1,4 @@
 /*
- * =================================================================================
- * 專案「鴨嘴獸核心 API」 v2.2.1 (「PM 大哥 v109.0 最終修正」版)
- *
- * 總技術經理 (CTO): 咪咪
- * 專案經理 (PM): 大哥 (王名揚)
- *
  * v2.2.1 更新日誌 (CTO 咪咪 v109.0 再次謝罪):
  * 1. [v2.2.1 致命修正]：修復 v2.2.0 的編譯錯誤：
  * - 修正 L129： 'public class ModBehaviour' 忘記加上 'partial' 關鍵字。
@@ -46,8 +40,7 @@ using System.Linq;
 using System.Text.RegularExpressions; // 為了 Regex
 using System.Threading.Tasks;
 
-// [v2.1.0 修正] 移除 TeamSoda.Duckov.Core (大哥說會報錯)
-// using TeamSoda.Duckov.Core;
+
 using Duckov.Economy; // 為了 Cost/Price
 
 namespace DuckovCoreAPI
@@ -635,9 +628,8 @@ namespace DuckovCoreAPI
                 string[] lines = File.ReadAllLines(iniPath);
                 foreach (string line in lines)
                 {
-                    // (API: 大哥 v92.0 範例 -> name = FancyItems)
-                    // 我們必須分割 '=' 並 Trim()
-                    string[] parts = line.Split(new char[] { '=' }, 2); // 只切一次
+
+                    string[] parts = line.Split(new char[] { '=' }, 2); 
                     if (parts.Length < 2) continue;
 
                     string key = parts[0].Trim();
@@ -777,7 +769,7 @@ namespace DuckovCoreAPI
             finally
             {
                 Log($"CTO 咪咪: Phase A (JSON 掃描) 完畢。在 {modsToScan.Count} 個 Mod 中找到 {itemsFoundInJsons} 筆新物品。");
-                // [v1.1.3 核心修正] 變數現在 100% 在 Scope 內了！
+
                 if (cacheNeedsUpdate)
                 {
                     await SaveWorkshopCacheAsync();
