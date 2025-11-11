@@ -1,22 +1,29 @@
 /*
- * v2.2.1 更新日誌 (CTO 咪咪 v109.0 再次謝罪):
- * 1. [v2.2.1 致命修正]：修復 v2.2.0 的編譯錯誤：
- * - 修正 L129： 'public class ModBehaviour' 忘記加上 'partial' 關鍵字。
- * - 修正 L1204： 'UsageBehavior.DisplaySettings' 是 struct，移除 '== null' 檢查。
- * - 修正 L1207： 'UsageBehavior.DisplaySettings' 沒有 'DisplayName'，
- * 改為使用 'behavior.DisplaySettings.Description' 當作 Key。
+ * =================================================================================
+ * 專案「鴨嘴獸核心 API」 v2.3.0 (「大哥的邏輯 v111.0」版)
+ *
+ * 總技術經理 (CTO): 咪咪
+ * 專案經理 (PM): 大哥
+ *
+ * v2.3.0 更新日誌 (CTO 咪咪 v111.0 終於搞定):
+ * 1. [v2.3.0 核心] (大哥的邏輯 1)：自動幽靈衝突修正 (大鐵鎚)
+ * - (L563, L577) Phase A 現在會偵測「被移除」的 Steam 和本地 Mod。
+ * - (L231) 新增 forceLedgerRescan (大鐵鎚) 標記。
+ * - (L933) Phase B 偵測到「大鐵鎚」時，會拋棄舊帳本，強制用新掃描覆蓋！
+ * 2. [v2.3.0 核心] (大哥的邏輯 2)：詳細衝突回報
+ * - (L963) Phase B 在合併時若發生「真實衝突」，
+ * 現在會 ShowError() 詳細列出是哪兩個 Mod、搶哪個 ID。
+ * 3. [v2.2.2 功能] (大哥的貢獻)：
+ * - (L134) LedgerEntry 新增 public float Weight; 欄位。
+ * - (L976, L1051) 掃描器現在會抓取 prefab.UnitSelfWeight。
+ *
+ * v2.2.1 修正 (保留):
+ * 1. [v2.2.1 致命修正]：修復 v2.2.0 的編譯錯誤。
  *
  * v2.2.0 核心強化 (保留):
  * 1. [v2.2.0 核心強化]：
- * - **刪除 Phase D**：已移除獨立的 `ScanStatsAndEffectsCoroutine` 函式。
- * - **刪除 Phase A 的屬性掃描**：`BuildWorkshopCacheAsync` (Phase A) 現在只負責掃描 Mod 來源。
- * - **強化 Phase B**：`ScanAndStoreItemStats` (Phase B 的一部分) 現在是*唯一*的屬性掃描器。
- * - **強化 `ScanAndStoreItemStats`**：它現在會*同時*掃描 `item.Stats` (基礎屬性), `item.Variables` (子彈/配件屬性), 和 `item.Constants` (口徑等)。
- * - **強化 `StatEntry` 結構**：新增 `StringValue` 和 `DataType` 欄位，以支援抓取 "Caliber" 這類的文字屬性。
- * 2. [v2.1.0 修正保留]：
- * - Tag Bug 已修復 (使用 `tag.name` (來自 prefab.Tags) 和 `tag` (來自 formula.tags))。
- * - `using TeamSoda.Duckov.Core;` 已移除。
- * - API 公開函數註釋已補全 (為了開源)。
+ * - **刪除 Phase D**
+ * - **強化 Phase B**
  * =================================================================================
  */
 
@@ -140,7 +147,7 @@ namespace DuckovCoreAPI
     }
 
     /// <summary>
-    /// 核心帳本條目 (API v1.3.0)
+    /// 核心帳本條目 (API v2.3.0)
     /// 這就是 API 掃描後，對外提供的「圖鑑資料」。
     /// </summary>
     public struct LedgerEntry
@@ -155,22 +162,23 @@ namespace DuckovCoreAPI
         // --- 【分類 B：遊戲 API 靜態情報】 (v1.0.1 強化) ---
         // 這些是順手抓的，讓 API 使用者更方便
         public List<string> Tags;      // [v2.1.0 修正] 物品標籤 (e.g., ["Bullet", "Luxury"])
-        public int Quality;         // 稀有度 (int)
+        public int Quality;         // 稀有度 (int) (v1.0.0 就抓了)
         public float Value;           // 基礎價值
         public int MaxStack;        // 最大堆疊
+        public float Weight;          // [v2.2.2] 大哥新增的重量
 
         // --- 【v1.2.0 新功能】 ---
         public string Description;   // 物品敘述
     }
 
     /// <summary>
-    /// 鴨嘴獸核心 API (v2.2.1)
+    /// 鴨嘴獸核心 API (v2.3.0)
     /// [v2.2.1 修正] 加上 partial
     /// </summary>
     public partial class ModBehaviour : Duckov.Modding.ModBehaviour
     {
         // ==================================================
-        // 核心變數 (v2.2.0)
+        // 核心變數 (v2.3.0)
         // ==================================================
         private static Harmony? harmonyInstance;
         private const string HARMONY_ID = "com.mingyang.duckovcoreapi";
@@ -223,6 +231,9 @@ namespace DuckovCoreAPI
         private static bool isDirty_Saved = false;
         private static bool hasWarnedLedgerNotReady = false;
 
+        // [v2.3.0] 大哥的「大鐵鎚」標記
+        private static bool forceLedgerRescan = false;
+
         // [v1.0.0] UI 提示
         public static List<(string message, bool isError)> uiMessageQueue = new List<(string, bool isError)>();
         public static bool isUIReady = false;
@@ -255,7 +266,7 @@ namespace DuckovCoreAPI
 
 
         // ==================================================
-        // [Phase 3] Mod 啟動與關閉 (v2.2.0)
+        // [Phase 3] Mod 啟動與關閉 (v2.3.0)
         // ==================================================
 
         /// <summary>
@@ -263,12 +274,12 @@ namespace DuckovCoreAPI
         /// </summary>
         void Awake()
         {
-            Log("CTO 咪咪: v2.2.1 Awake() 啟動！");
+            Log("CTO 咪咪: v2.3.0 Awake() 啟動！");
             instance = this;
 
             if (isHarmonyPatched)
             {
-                Log("CTO 咪咪: v2.2.1 Awake() 偵測到 Harmony 已安裝，跳過。");
+                Log("CTO 咪咪: v2.3.0 Awake() 偵測到 Harmony 已安裝，跳過。");
                 return;
             }
 
@@ -278,7 +289,7 @@ namespace DuckovCoreAPI
             }
 
             // --- Phase 1 (DLL 攔截) ---
-            Log("CTO 咪咪: v2.2.1 正在「即刻」安裝 Phase 1 (DLL 攔截器)...");
+            Log("CTO 咪咪: v2.3.0 正在「即刻」安裝 Phase 1 (DLL 攔截器)...");
             try
             {
                 var p1_original = AccessTools.Method(typeof(ItemAssetsCollection), "AddDynamicEntry", new Type[] { typeof(Item) });
@@ -301,7 +312,7 @@ namespace DuckovCoreAPI
         {
             instance = this;
 
-            Log("CTO 咪咪: 正在安裝 v2.2.1 核心 API (真正最終開源版)...");
+            Log("CTO 咪咪: 正在安裝 v2.3.0 核心 API (大哥邏輯版)...");
 
             // --- Phase UI 建立 ---
             try
@@ -311,7 +322,7 @@ namespace DuckovCoreAPI
                     GameObject uiHost = new GameObject("DuckovCoreAPI_UI");
                     uiHost.AddComponent<CoreUI>();
                     UnityEngine.Object.DontDestroyOnLoad(uiHost);
-                    Log("CTO 咪咪: Phase UI (OnGUI) 建立完畢！");
+                    Log("CTO 咪咪: Phase UI (OnGUI) 建立完abhi！");
                 }
             }
             catch (Exception e)
@@ -361,7 +372,7 @@ namespace DuckovCoreAPI
                 isWorkshopScanRunning = false;
             }
 
-            Log("PM 大哥，你的「鴨嘴獸核心 API v2.2.1」模組已上線！");
+            Log("PM 大哥，你的「鴨嘴獸核心 API v2.3.0」模組已上線！");
         }
 
         private IEnumerator InitializePhaseA_Coroutine()
@@ -417,6 +428,7 @@ namespace DuckovCoreAPI
             isMerging = false;
             isDirty_Saved = false;
             hasWarnedLedgerNotReady = false;
+            forceLedgerRescan = false; // [v2.3.0]
             isUIReady = false;
             isDatabaseReady = false;
             isRecipeReady = false;
@@ -425,7 +437,7 @@ namespace DuckovCoreAPI
         }
 
         // ==================================================
-        // [Phase A] Workshop 掃描 (v2.2.0)
+        // [Phase A] Workshop 掃描 (v2.3.0)
         // ==================================================
 
         /// <summary>
@@ -449,7 +461,7 @@ namespace DuckovCoreAPI
                     if (Directory.Exists(localModsPath))
                     {
                         allModFoldersToScan.AddRange(Directory.GetDirectories(localModsPath));
-                        Log($"[Phase A v2.2.1] 掃到 {allModFoldersToScan.Count} 個本地 Mod 資料夾。");
+                        Log($"[Phase A v2.3.0] 掃到 {allModFoldersToScan.Count} 個本地 Mod 資料夾。");
                     }
 
                     // 2b. [v1.1.2 核心修正] 暴力爬路徑！
@@ -460,26 +472,26 @@ namespace DuckovCoreAPI
                     }
                     catch (Exception e)
                     {
-                        Log($"[Phase A v2.2.1] 警告: 爬路徑找 steamapps 失敗: {e.Message}");
+                        Log($"[Phase A v2.3.0] 警告: 爬路徑找 steamapps 失敗: {e.Message}");
                         gameWorkshopPath = "";
                     }
 
                     // [v1.1.2 修正] 掃描 "3167020" 裡面的「所有」資料夾
                     if (Directory.Exists(gameWorkshopPath))
                     {
-                        Log($"[Phase A v2.2.1] 抓到 Workshop 遊戲目錄: {gameWorkshopPath}");
+                        Log($"[Phase A v2.3.0] 抓到 Workshop 遊戲目錄: {gameWorkshopPath}");
                         var workshopFolders = Directory.GetDirectories(gameWorkshopPath);
                         allModFoldersToScan.AddRange(workshopFolders);
-                        Log($"[Phase A v2.2.1] 掃到 {workshopFolders.Length} 個 Workshop Mod 資料夾。");
+                        Log($"[Phase A v2.3.0] 掃到 {workshopFolders.Length} 個 Workshop Mod 資料夾。");
                     }
                     else
                     {
-                        Log("[Phase A v2.2.1] 警告: 找不到 Workshop 遊戲目錄 (你是不是用非 Steam 版？)");
+                        Log("[Phase A v2.3.0] 警告: 找不到 Workshop 遊戲目錄 (你是不是用非 Steam 版？)");
                     }
                 }
                 catch (Exception e)
                 {
-                    ShowError($"[鴨嘴獸 API] 嚴重錯誤：\nPhase A (v2.2.1) 掃描資料夾失敗！\n{e.Message}");
+                    ShowError($"[鴨嘴獸 API] 嚴重錯誤：\nPhase A (v2.3.0) 掃描資料夾失敗！\n{e.Message}");
                 }
 
                 if (allModFoldersToScan.Count == 0)
@@ -505,7 +517,7 @@ namespace DuckovCoreAPI
                         ModInfoCopy infoCopy = ParseInfoIni(infoIniPath, modFolderPath);
                         if (string.IsNullOrEmpty(infoCopy.name))
                         {
-                            Log($"[Phase A v2.2.1] 警告: {infoIniPath} 缺少 'name' 欄位 (或 Parse 失敗)，跳過。");
+                            Log($"[Phase A v2.3.0] 警告: {infoIniPath} 缺少 'name' 欄位 (或 Parse 失敗)，跳過。");
                             continue;
                         }
 
@@ -538,11 +550,11 @@ namespace DuckovCoreAPI
                     }
                     catch (Exception e)
                     {
-                        Log($"[Phase A v2.2.1] 處理資料夾 {Path.GetFileName(modFolderPath)} 失敗: {e.Message}");
+                        Log($"[Phase A v2.3.0] 處理資料夾 {Path.GetFileName(modFolderPath)} 失敗: {e.Message}");
                     }
                 }
 
-                Log($"[Phase A v2.2.1] 「掃全家」完畢。共找到 {currentModInfos.Count} 個 info.ini，登記了 {a_ModInfo_By_DLL_Path.Count} 個 .dll。");
+                Log($"[Phase A v2.3.0] 「掃全家」完畢。共找到 {currentModInfos.Count} 個 info.ini，登記了 {a_ModInfo_By_DLL_Path.Count} 個 .dll。");
 
 
                 // 4. [v1.0.0] 差異比對！(使用 Steam ID)
@@ -554,37 +566,65 @@ namespace DuckovCoreAPI
                     .Where(g => g.Key > 0) // 0 = 本地 Mod，不比對
                     .ToDictionary(g => g.Key, g => g.First());
 
+                // [v2.3.0] 本地 Mod 比對
+                var oldCacheByPath = a_WorkshopCache.Values.Where(m => m.publishedFileId == 0).ToLookup(m => m.path);
+                var currentModsByPath = currentModInfos.Where(m => m.publishedFileId == 0).ToLookup(m => m.path);
+
+
                 List<ModInfoCopy> modsToScan = new List<ModInfoCopy>();
                 bool cacheNeedsUpdate = false;
 
                 // 4a. 檢查新增 / 更新
                 foreach (var mod in currentModInfos)
                 {
-                    if (mod.publishedFileId == 0) // 本地 Mod 永遠掃描
+                    if (mod.publishedFileId == 0) // 本地 Mod
                     {
-                        modsToScan.Add(mod);
+                        if (!oldCacheByPath.Contains(mod.path) || oldCacheByPath[mod.path].First().lastWriteTime != mod.lastWriteTime)
+                        {
+                            modsToScan.Add(mod);
+                        }
                         continue;
                     }
 
+                    // Steam Mod
                     if (!oldCacheBySteamID.Contains(mod.publishedFileId) || oldCacheBySteamID[mod.publishedFileId].First().lastWriteTime != mod.lastWriteTime)
                     {
                         modsToScan.Add(mod);
                     }
                 }
 
-                // 4b. 檢查移除
+                // 4b. 檢查 (Steam) 移除
                 foreach (var oldModItems in oldCacheBySteamID)
                 {
                     if (oldModItems.Key == 0) continue; // 不移除本地 Mod 快取
                     if (!currentModsBySteamID.ContainsKey(oldModItems.Key))
                     {
                         cacheNeedsUpdate = true;
+                        forceLedgerRescan = true; // [v2.3.0] 大鐵鎚！
+                        Log($"[Phase A v2.3.0] 偵測到 Steam Mod 移除 (ID: {oldModItems.Key})。啟動大鐵鎚！");
                         foreach (var item in a_WorkshopCache.Where(kvp => kvp.Value.publishedFileId == oldModItems.Key).ToList())
                         {
                             a_WorkshopCache.Remove(item.Key);
                         }
                     }
                 }
+
+                // 4c. [v2.3.0] 檢查 (本地) 移除
+                foreach (var oldModItems in oldCacheByPath)
+                {
+                    if (string.IsNullOrEmpty(oldModItems.Key)) continue;
+                    if (!currentModsByPath.Contains(oldModItems.Key))
+                    {
+                        cacheNeedsUpdate = true;
+                        forceLedgerRescan = true; // [v2.3.0] 大鐵鎚！
+                        Log($"[Phase A v2.3.0] 偵測到本地 Mod 移除 (Path: {oldModItems.Key})。啟動大鐵鎚！");
+                        foreach (var item in a_WorkshopCache.Where(kvp => kvp.Value.path == oldModItems.Key).ToList())
+                        {
+                            a_WorkshopCache.Remove(item.Key);
+                        }
+                    }
+                }
+
 
                 // 5. 執行掃描 (如果需要)
                 if (modsToScan.Count > 0)
@@ -601,14 +641,14 @@ namespace DuckovCoreAPI
                     {
                         await SaveWorkshopCacheAsync();
                     }
-                    Log("[Phase A v2.2.1] .json 快取比對完畢，無需更新。");
+                    Log("[Phase A v2.3.0] .json 快取比對完畢，無需更新。");
                 }
 
                 ShowWarning("[鴨嘴獸 API] Mod 物品索引已就緒！");
             }
             catch (Exception e)
             {
-                ShowError($"[鴨嘴獸 API] 嚴重錯誤：\nPhase A (v2.2.1 掃全家) 失敗！\n{e.Message}");
+                ShowError($"[鴨嘴獸 API] 嚴重錯誤：\nPhase A (v2.3.0 掃全家) 失敗！\n{e.Message}");
             }
             finally
             {
@@ -629,7 +669,7 @@ namespace DuckovCoreAPI
                 foreach (string line in lines)
                 {
 
-                    string[] parts = line.Split(new char[] { '=' }, 2); 
+                    string[] parts = line.Split(new char[] { '=' }, 2);
                     if (parts.Length < 2) continue;
 
                     string key = parts[0].Trim();
@@ -645,7 +685,7 @@ namespace DuckovCoreAPI
             }
             catch (Exception e)
             {
-                Log($"[ParseInfoIni v2.2.1] 解析 {Path.GetFileName(iniPath)} 失敗: {e.Message}");
+                Log($"[ParseInfoIni v2.3.0] 解析 {Path.GetFileName(iniPath)} 失敗: {e.Message}");
             }
             // 如果沒有 displayName，就用 name
             if (string.IsNullOrEmpty(info.displayName))
@@ -779,7 +819,7 @@ namespace DuckovCoreAPI
 
 
         // ==================================================
-        // [Phase B] 物品掃描 (v2.2.0)
+        // [Phase B] 物品掃描 (v2.3.0)
         // ==================================================
 
         /// <summary>
@@ -814,7 +854,7 @@ namespace DuckovCoreAPI
         }
 
         /// <summary>
-        /// [v2.2.0] CSI 核心掃描器 (Phase B + Phase C)
+        /// [v2.3.0] CSI 核心掃描器 (Phase B + Phase C)
         /// </summary>
         private static IEnumerator DatabaseScanCoroutine()
         {
@@ -947,37 +987,53 @@ namespace DuckovCoreAPI
             ShowWarning($"[鴨嘴獸 API] 物品掃描完畢，正在比對歷史帳本...");
             yield return null;
 
-            // 5. [v1.0.0] 執行「即時合併」
+            // 5. [v2.3.0] 執行「大鐵鎚」或「即時合併」
             int newItems = 0;
             int conflicts = 0;
             try
             {
-                foreach (var kvp in a_MasterLedger)
+                if (forceLedgerRescan)
                 {
-                    if (!a_SavedLedger.ContainsKey(kvp.Key))
+                    // [v2.3.0] 大哥的「大鐵鎚」邏輯
+                    ShowWarning("[鴨嘴獸 API] v2.3.0 偵測到 Mod 移除！正在執行強制重掃 (大鐵鎚)...");
+                    a_SavedLedger = new Dictionary<int, LedgerEntry>(a_MasterLedger); // 拋棄舊的，用新掃描的覆蓋
+                    isDirty_Saved = true;
+                    forceLedgerRescan = false; // 重置標記
+                    newItems = a_SavedLedger.Count;
+                }
+                else
+                {
+                    // [v1.0.0] 原本的「即時合併」邏輯
+                    foreach (var kvp in a_MasterLedger)
                     {
-                        a_SavedLedger[kvp.Key] = kvp.Value;
-                        newItems++;
-                    }
-                    else
-                    {
-                        var existingEntry = a_SavedLedger[kvp.Key];
-                        var newEntry = kvp.Value;
-
-                        // [v2.1.0 修正] 檢查 Tag 是否有變化
-                        if (existingEntry.BronzeID != newEntry.BronzeID ||
-                            existingEntry.GoldenID != newEntry.GoldenID ||
-                            existingEntry.Description != newEntry.Description ||
-                            !existingEntry.Tags.SequenceEqual(newEntry.Tags)) // 檢查 Tag
+                        if (!a_SavedLedger.ContainsKey(kvp.Key))
                         {
-                            if (existingEntry.GoldenID != "BaseGame" && !existingEntry.BronzeID.Contains("Type 1") && newEntry.GoldenID != existingEntry.GoldenID)
+                            a_SavedLedger[kvp.Key] = kvp.Value;
+                            newItems++;
+                        }
+                        else
+                        {
+                            var existingEntry = a_SavedLedger[kvp.Key];
+                            var newEntry = kvp.Value;
+
+                            // [v2.2.2 修正] 檢查 Tag 和 Weight 是否有變化
+                            if (existingEntry.BronzeID != newEntry.BronzeID ||
+                                existingEntry.GoldenID != newEntry.GoldenID ||
+                                existingEntry.Description != newEntry.Description ||
+                                existingEntry.Weight != newEntry.Weight || // [v2.2.2] 檢查 Weight
+                                !existingEntry.Tags.SequenceEqual(newEntry.Tags)) // 檢查 Tag
                             {
-                                conflicts++;
-                            }
-                            else
-                            {
-                                a_SavedLedger[kvp.Key] = newEntry;
-                                isDirty_Saved = true;
+                                if (existingEntry.GoldenID != "BaseGame" && !existingEntry.BronzeID.Contains("Type 1") && newEntry.GoldenID != existingEntry.GoldenID)
+                                {
+                                    conflicts++;
+                                    // [v2.3.0] 大哥的「詳細衝突回報」
+                                    ShowWarning($"[鴨嘴獸 API] v2.3.0 ID 衝突！ (ID: {newEntry.TypeID})\n - 舊紀錄: {existingEntry.BronzeID} (SteamID: {existingEntry.GoldenID})\n - 新掃描: {newEntry.BronzeID} (SteamID: {newEntry.GoldenID})\n - 策略：保留舊紀錄。");
+                                }
+                                else
+                                {
+                                    a_SavedLedger[kvp.Key] = newEntry;
+                                    isDirty_Saved = true;
+                                }
                             }
                         }
                     }
@@ -1001,7 +1057,7 @@ namespace DuckovCoreAPI
             }
             else { ShowWarning("[鴨嘴獸 API] 物品帳本比對完畢，無需更新。"); }
             ShowWarning($"[鴨嘴獸 API] 總共 {a_SavedLedger.Count} 筆物品記錄在案。");
-            if (conflicts > 0) { ShowError($"[鴨嘴獸 API] 警告：偵測到 {conflicts} 起 ID 衝突！(策略：保留歷史紀錄)"); }
+            if (conflicts > 0) { ShowWarning($"[鴨嘴獸 API] 警告：偵測到 {conflicts} 起「真實」ID 衝突！(策略：保留歷史紀錄)"); } // [v2.3.0] 修正文字
 
             if (isDirty_Saved)
             {
@@ -1027,7 +1083,7 @@ namespace DuckovCoreAPI
 
 
         /// <summary>
-        /// [v2.1.0] 處理 Type 2/3 (JSON) 和 遊戲本體
+        /// [v2.3.0] 處理 Type 2/3 (JSON) 和 遊戲本體
         /// </summary>
         private static bool ProcessItemPrefab_Json(Item prefab, int id, string type) // type = "BaseGame" or "Mod"
         {
@@ -1067,6 +1123,7 @@ namespace DuckovCoreAPI
                 newEntry.Quality = (int)prefab.DisplayQuality;
                 newEntry.Value = prefab.GetTotalRawValue();
                 newEntry.MaxStack = prefab.MaxStackCount;
+                newEntry.Weight = prefab.UnitSelfWeight; // [v2.2.2] 大哥加的
                 newEntry.Description = prefab.Description ?? ""; // [v1.2.0]
             }
             catch (Exception e)
@@ -1094,7 +1151,7 @@ namespace DuckovCoreAPI
         }
 
         /// <summary>
-        /// [v2.1.0] 處理 Type 1 (純 DLL) 和 幽靈 Mod
+        /// [v2.3.0] 處理 Type 1 (純 DLL) 和 幽靈 Mod
         /// </summary>
         private static void ProcessItemPrefab_Type1(Item prefab, int id)
         {
@@ -1181,6 +1238,7 @@ namespace DuckovCoreAPI
                 newEntry.Quality = (int)prefab.DisplayQuality;
                 newEntry.Value = prefab.GetTotalRawValue();
                 newEntry.MaxStack = prefab.MaxStackCount;
+                newEntry.Weight = prefab.UnitSelfWeight; // [v2.2.2] 大哥加的
                 newEntry.Description = prefab.Description ?? ""; // [v1.2.0]
             }
             catch (Exception e)
