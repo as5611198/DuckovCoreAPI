@@ -1,16 +1,39 @@
 /*
  * =================================================================================
- * 專案「鴨嘴獸核心 API」 (Duckov Core API) v2.8.0
+ * 專案「鴨嘴獸核心 API」 (Duckov Core API) v3.0.0 ()
  *
  * 核心 API，用於掃描遊戲物品來源、屬性與配方，供其他 Mod 呼叫。
+ * V3.0.0更新日誌:
+ * 1.修復如有兩個模組同時使用一樣的物品名稱時只會紀錄其中一個導致我的配方反查（UTI)無法正常抓取
+ * 2.修復物品衝突日誌使用物品名稱反查.json 現已更改為使用物品ID反查.json
+ * 3.新增modsetting開關 現在可自由決定是否有開啟提示訊息
+ * 4.新增modsetting按鈕 現在可以在遊戲中簡單移除快取檔案！！！
+ * 如果是在主選單中使用清除功能可直接進入遊戲
+ * 但如果是在世界內清楚仍然需要重啟遊戲
+ * 7.修復每次撤離或是進入世界重複掃描問題！
+ * v2.8.1 修正日誌 :
+ * 1. [v2.8.1 JEI 修正] 
+ * - 修正 Issue #1 & #4：修正反向索引 (Reverse Ledger) 邏輯。
+ * - `a_ReverseLedger_...` 現在是 `Dictionary<string, List<int>>`，允許同個 ItemNameKey (物品名稱) 擁有多個 TypeID (物品ID)。
+ * - 這解決了 `UsageTerminator` (JEI) 無法反查所有同名稱物品的問題。
+ * - 保留舊的 `GetTypeID` (只回傳 List[0])，並新增 `GetTypeIDs` (回傳完整 List) API。
+ * 2. [v2.8.1 掃描修正]
+ * - 修正 Issue #2：新增 `hasScannedThisSession` 旗標。
+ * - 物品/配方掃描 (Phase B, C) 現在只會在
+ * `OnLevelLoaded_DatabaseScan` 
+ * 首次被呼叫時執行一次，避免撤離或重進地圖時重複掃描。
+ * 3. [v2.8.1 ModSetting]
+ * - 修正 Issue #3：整合 ModSettingAPI。
+ * - 新增 `EnableCoreUIMessages` (啟用 DuckovCoreAPI 左下角訊息) 的開關。
+ * - `ShowError`, `ShowWarning`, `CoreUI.OnGUI` 現在會檢查此設定。
  *
  * v2.8.0 更新日誌:
  * 1. [v2.8.0 核心] 屬性白名單 (ATTRIBUTE_WHITELIST) 更新：
  * - 刪除了舊的自訂白名單。
- * - [cite_start]導入了基於遊戲內省 (introspection) 的完整屬性白名單 [cite: 1125-1135]。
+ * - 導入了基於遊戲內省 (introspection) 的完整屬性白名單 [cite: 1125-1135]。
  * 2. [v2.8.0 核心] 掃描邏輯調整：
  * - 移除了 `ScanForContainerStats` 函數，因其邏輯已合併。
- * - [cite_start]`ScanForStats` 和 `ScanForCustomData` 現在 100% 依賴新的白名單運作 [cite: 1417-1419]。
+ * - `ScanForStats` 和 `ScanForCustomData` 現在 100% 依賴新的白名單運作 [cite: 1417-1419]。
  *
  * v2.7.0 修正 (保留):
  * 1. 重寫 `ScanAndStoreItemStats` 以提高效能與準確性。
@@ -31,15 +54,18 @@ using System.IO;
 using System.Reflection; // 為了 StackTrace, AccessTools, BindingFlags
 using System.Collections;
 using System.Collections.Generic;
+using System.Text.RegularExpressions; // 為了 Regex [cite: 74]
+using System.Text; // <--- 加上這行
+using System.Threading.Tasks;
+using Duckov.Economy; // 為了 Cost/Price [cite: 74]
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Linq;
-using System.Text.RegularExpressions; // 為了 Regex
-using System.Threading.Tasks;
-using Duckov.Economy; // 為了 Cost/Price
 using Duckov.UI;
 // [v2.5.0] 修正：為了 StatCollection, Stat
 using ItemStatsSystem.Stats;
+using Newtonsoft.Json.Linq;
+
 namespace DuckovCoreAPI
 {
     // ==================================================
@@ -183,13 +209,13 @@ namespace DuckovCoreAPI
     }
 
     /// <summary>
-    /// 鴨嘴獸核心 API (v2.8.0)
+    /// 鴨嘴獸核心 API (v2.8.1)
     /// [v2.2.1 修正] 加上 partial
     /// </summary>
     public partial class ModBehaviour : Duckov.Modding.ModBehaviour
     {
         // ==================================================
-        // 核心變數 (v2.8.0)
+        // 核心變數 (v2.8.1)
         // ==================================================
         private static Harmony?
 harmonyInstance;
@@ -214,8 +240,7 @@ harmonyInstance;
             "UnityEngine.CoreModule.dll",
             "mscorlib.dll",
             "TeamSoda.Duckov.Core.dll",
-
-      "DuckovCoreAPI.dll",
+            "DuckovCoreAPI.dll",
             "0Harmony.dll"
         };
         // [v1.0.0 核心] (Phase A) DLL 路徑 -> ModInfo 對照表
@@ -228,19 +253,32 @@ harmonyInstance;
         private static Dictionary<string, RecipeEntry> a_RecipeLedger = new Dictionary<string, RecipeEntry>();
         // [v2.0.0 核心] 「屬性/效果」帳本
         private static Dictionary<int, StatsAndEffectsEntry> a_StatsEffectsLedger = new Dictionary<int, StatsAndEffectsEntry>();
+
         // [v1.0.0 核心] 「反向索引」 (用來加速 API 查詢)
-        private static Dictionary<string, int> a_ReverseLedger_Golden = new Dictionary<string, int>();
-        private static Dictionary<string, int> a_ReverseLedger_Silver = new Dictionary<string, int>();
-        private static Dictionary<string, int> a_ReverseLedger_Bronze = new Dictionary<string, int>();
+        // [v2.8.1 JEI 修正] 支援同名稱多 ID
+        private static Dictionary<string, List<int>> a_ReverseLedger_Golden = new Dictionary<string, List<int>>();
+        private static Dictionary<string, List<int>> a_ReverseLedger_Silver = new Dictionary<string, List<int>>();
+        private static Dictionary<string, List<int>> a_ReverseLedger_Bronze = new Dictionary<string, List<int>>();
+
         private static bool isFirstRun_Saved = false;
         private static bool isLedgerReady_Saved = false;
         private static bool isMerging = false;
         private static bool isDirty_Saved = false;
         private static bool hasWarnedLedgerNotReady = false;
+
         // [v2.4.0] UI 訊息佇列 (用於在 UI 就緒前緩存訊息)
         public static List<(string message, float timestamp, bool isError, float duration)> uiMessageQueue_v2 = new List<(string, float, bool, float)>();
         public static bool isUIReady = false;
 
+        // [v2.8.1 掃描修正]
+        private static bool hasScannedThisSession = false;
+
+        // [v2.8.1 ModSetting]
+        internal const string SETTING_ENABLE_UI_MESSAGES = "EnableCoreUIMessages";
+        internal static bool showUIMessages = true;
+        
+        // [咪咪 v2.8.4 修正] ModSetting 註冊旗標
+        private bool _isModSettingRegistered = false;
         // [v1.0.0 核心] 聖杯訊號！
         private static bool isDatabaseReady = false;
         // [v1.3.0 核心] 配方聖杯訊號！
@@ -250,10 +288,12 @@ harmonyInstance;
 
 
         internal static ModBehaviour?
-instance;
+        instance;
 
         private const string LEDGER_FILENAME_SAVED = "ID_Master_Ledger.json";
         private const string RECIPE_FILENAME_SAVED = "ID_Recipe_Ledger.json";
+       
+        
         // [v1.3.0] 新增
         private const string STATS_FILENAME_SAVED = "ID_StatsEffects_Ledger.json";
         // [v2.0.0] 新增
@@ -286,8 +326,7 @@ instance;
             "CritRate",
             "CritDamageFactor",
             "ArmorPiercing",
-
-     "AttackSpeed",
+            "AttackSpeed",
             "AttackRange",
             "StaminaCost",
             "WalkSpeed",
@@ -295,8 +334,7 @@ instance;
             "TurnSpeed",
             "AimSpeed",
             "Stability",
-
- "StabilityScoping",
+            "StabilityScoping",
             "Ergonomics",
             "RecoilPercentage",
             "RecoilPercentageScoping",
@@ -305,8 +343,7 @@ instance;
             "HorizontalRecoil",
             "RecoilScoping",
             "VerticalRecoilScoping",
-
-         "HorizontalRecoilScoping",
+            "HorizontalRecoilScoping",
             "RecoilVisual",
             "VerticalRecoilVisual",
             "HorizontalRecoilVisual",
@@ -314,8 +351,7 @@ instance;
             "VerticalRecoilVisualScoping",
             "HorizontalRecoilVisualScoping",
             "RecoilCompensation",
-
-     "RecoilCompensationScoping",
+            "RecoilCompensationScoping",
             "RecoilDrift",
             "RecoilDriftScoping",
             "RecoilDriftHorizontal",
@@ -323,8 +359,7 @@ instance;
             "RecoilDispersion",
             "RecoilDispersionScoping",
             "Scatter",
-
- "ScatterScoping",
+            "ScatterScoping",
             "ScatterFire",
             "ScatterFireScoping",
             "Deviation",
@@ -333,8 +368,7 @@ instance;
             "HipAccuracy",
             "ScopingAccuracy",
             "AimSensitivity",
-
-         "ScopingSensitivity",
+            "ScopingSensitivity",
             "MaxDurability",
             "Durability",
             "DurabilityBurn",
@@ -342,8 +376,7 @@ instance;
             "MalfunctionChance",
             "MuzzleVelocity",
             "Armor",
-
-     "ArmorClass",
+            "ArmorClass",
             "ArmorDamageReduction",
             "HelmetArmor",
             "Encumbrance",
@@ -351,8 +384,7 @@ instance;
             "NoiseScoping",
             "Loudness",
             "Hearing",
-
- "DamageMultiplier",
+            "DamageMultiplier",
             "ArmorPiercingMultiplier",
             "ArmorDamageMultiplier",
             "AccuracyMultiplier",
@@ -361,8 +393,7 @@ instance;
             "RecoilYMultiplier",
             "ErgonomicsMultiplier",
             "MuzzleVelocityMultiplier",
-
-         "StaminaCostMultiplier",
+            "StaminaCostMultiplier",
             "AimSpeedMultiplier",
             "ScopingThreatReduction",
             "MoveSpeedPenalty",
@@ -370,8 +401,7 @@ instance;
             "ErgonomicsPenalty",
             "NewArmorPiercingGain",
             "NewDamageGain",
-
-     "StaminaBurn",
+            "StaminaBurn",
             "AmmoCost",
             "Caliber" // [v2.8.0] 補上 v2.2.0 就有的 Caliber
         };
@@ -384,12 +414,12 @@ instance;
         /// </summary>
         void Awake()
         {
-            Log("v2.8.0 Awake() 啟動。");
+            Log("v2.8.1 Awake() 啟動。");
             instance = this;
 
             if (isHarmonyPatched)
             {
-                Log("v2.8.0 Awake() 偵測到 Harmony 已安裝，跳過。");
+                Log("v2.8.1 Awake() 偵測到 Harmony 已安裝，跳過。");
                 return;
             }
 
@@ -421,7 +451,12 @@ instance;
         protected override void OnAfterSetup()
         {
             instance = this;
-            Log("正在安裝 v2.8.0 核心 API (1.txt 照抄版)...");
+            Log("正在安裝 v3.0.0 (大哥最終版) 核心 API...");
+            
+            // [ v2.8.4 修正] 啟動 ModSetting 檢測協程
+            StartCoroutine(InitializeModSettingAPI());
+        
+
 
             // --- Phase UI 建立 ---
             try
@@ -478,9 +513,82 @@ instance;
                 isWorkshopScanRunning = false;
             }
 
-            Log("「鴨嘴獸核心 API v2.8.0」模組已啟動。");
+            Log("「鴨嘴獸核心 API v3.0.0」模組*核心*已啟動。 (等待 ModSetting...)");
         }
+        // === [ v2.8.4] 「迴圈檢測」協程 ===
+        private IEnumerator InitializeModSettingAPI()
+        {
+            if (_isModSettingRegistered) yield break;
+            
+            bool initSuccess = false;
 
+            while (!_isModSettingRegistered)
+            {
+                // [ v3.0.6 ] 
+                if (string.IsNullOrEmpty(base.info.name))
+                {
+                    Log("[DuckovCoreAPI] base.info 尚未就緒，等待 1 個 Frame...");
+                    yield return null; // 
+                    continue; // 
+                }
+
+                try
+                {
+                    // [v2.8.1 修正] 確保 ModSettingAPI.Init 存在
+                    if (ModSettingAPI.Init(base.info)) // 使用 base.ModInfo
+                    {
+                        Log("[DuckovCoreAPI] ModSettingAPI.Init() 成功！");
+
+                        // 讀取儲存的值
+                        if (!ModSettingAPI.GetSavedValue(SETTING_ENABLE_UI_MESSAGES, out showUIMessages))
+                        {
+                            showUIMessages = true; // 找不到設定檔，預設為 true
+                        }
+
+                        // 建立開關
+                        ModSettingAPI.AddToggle(
+                            SETTING_ENABLE_UI_MESSAGES,
+                            "啟用 DuckovCoreAPI 左下角訊息",
+                            showUIMessages,
+                            (bool newValue) => {
+                                showUIMessages = newValue;
+                            }
+                        );
+
+                        // === [ v3.0.0] 智慧型按鈕 ===
+                        ModSettingAPI.AddButton(
+                            "ForceClearCacheButton", // 按鈕 Key
+                            "【解決幽靈衝突】\n如果 Log 報告有衝突，但你已刪掉舊 Mod，請按此按鈕。\n(它會自動偵測你在主選單還是世界中)", // 描述
+                            "【 按我清除所有 API 快取 (智慧型) 】", // 按鈕上的字
+                            () => {
+                                // 呼叫 v3.0.0 的「智慧型」刪除函數
+                                ClearAllCachesAndNotify();
+                            }
+                        );
+                        // === v3.0.0 按鈕結束 ===
+
+                        _isModSettingRegistered = true; // 成功！跳出迴圈
+                        initSuccess = true;
+                    }
+                    else
+                    {
+                        // [v3.0.0 ] 
+                        ShowWarning("[DuckovCoreAPI] ModSettingAPI.Init() 回傳 false，2 秒後重試...");
+                    }
+
+                }
+                catch (Exception e)
+                {
+                    // [v3.0.0 ]  
+                    ShowWarning($"[DuckovCoreAPI] ModSettingAPI 尚未就緒 (Exception: {e.Message})，2 秒後重試...");
+                }
+
+                if (!initSuccess)
+                {
+                     yield return new WaitForSeconds(2.0f);
+                }
+            }
+        }
         private IEnumerator InitializePhaseA_Coroutine()
         {
             isWorkshopScanRunning = true;
@@ -541,6 +649,8 @@ instance;
             isStatsEffectsReady = false; // [v2.0.0]
             uiMessageQueue_v2.Clear();
             // [v2.4.0]
+            hasScannedThisSession = false; // [v2.8.1 掃描修正]
+            showUIMessages = true; // [v2.8.1 ModSetting] 重置為預設值
         }
 
         // ==================================================
@@ -576,7 +686,7 @@ instance;
 info = ParseModFolder(folder, true);
                             if (info != null) currentModInfos.Add(info.Value);
                         }
-                        Log($"[Phase A v2.8.0] 掃到 {currentModInfos.Count} 個本地 Mod。");
+                        Log($"[Phase A v2.8.1] 掃到 {currentModInfos.Count} 個本地 Mod。");
                     }
 
                     // 2b. [v1.1.2 核心修正] 向上爬路徑以尋找 Steam Workshop 資料夾
@@ -587,36 +697,36 @@ info = ParseModFolder(folder, true);
                     }
                     catch (Exception e)
                     {
-                        Log($"[Phase A v2.8.0] 警告: 爬路徑找 steamapps 失敗: {e.Message}");
+                        Log($"[Phase A v2.8.1] 警告: 爬路徑找 steamapps 失敗: {e.Message}");
                         gameWorkshopPath = "";
                     }
 
                     // 2c. [v1.1.2 修正] 掃描 "3167020" 裡面的「所有」資料夾
                     if (Directory.Exists(gameWorkshopPath))
                     {
-                        Log($"[Phase A v2.8.0] 抓到 Workshop 遊戲目錄: {gameWorkshopPath}");
+                        Log($"[Phase A v2.8.1] 抓到 Workshop 遊戲目錄: {gameWorkshopPath}");
                         var workshopFolders = Directory.GetDirectories(gameWorkshopPath);
                         int steamModCount = 0;
                         foreach (var folder in workshopFolders)
                         {
                             ModInfoCopy?
-info = ParseModFolder(folder, false);
+                            info = ParseModFolder(folder, false);
                             if (info != null)
                             {
                                 currentModInfos.Add(info.Value);
                                 steamModCount++;
                             }
                         }
-                        Log($"[Phase A v2.8.0] 掃到 {steamModCount} 個 Workshop Mod。");
+                        Log($"[Phase A v2.8.1] 掃到 {steamModCount} 個 Workshop Mod。");
                     }
                     else
                     {
-                        Log("[Phase A v2.8.0] 警告: 找不到 Workshop 遊戲目錄 (可能是非 Steam 版)");
+                        Log("[Phase A v2.8.1] 警告: 找不到 Workshop 遊戲目錄 (可能是非 Steam 版)");
                     }
                 }
                 catch (Exception e)
                 {
-                    ShowError($"[DuckovCoreAPI] 嚴重錯誤：\nPhase A (v2.8.0) 掃描資料夾失敗！\n{e.Message}");
+                    ShowError($"[DuckovCoreAPI] 嚴重錯誤：\nPhase A (v2.8.1) 掃描資料夾失敗！\n{e.Message}");
                 }
 
                 if (currentModInfos.Count == 0)
@@ -637,7 +747,7 @@ info = ParseModFolder(folder, false);
                         a_ModInfo_By_DLL_Path.Add(dllPath, info);
                     }
                 }
-                Log($"[Phase A v2.8.0] 遞迴掃描完畢。共找到 {currentModInfos.Count} 個 info.ini，登記了 {a_ModInfo_By_DLL_Path.Count} 個 .dll。");
+                Log($"[Phase A v2.8.1] 遞迴掃描完畢。共找到 {currentModInfos.Count} 個 info.ini，登記了 {a_ModInfo_By_DLL_Path.Count} 個 .dll。");
                 // 4. [v2.3.0] 執行差異比對 (Diff Check)
                 ShowWarning("[DuckovCoreAPI] 正在比對 Mod 快取...");
                 forceLedgerRescan = false; // [v2.3.0]
@@ -697,14 +807,14 @@ info = ParseModFolder(folder, false);
 
                         await SaveWorkshopCacheAsync();
                     }
-                    Log("[Phase A v2.8.0] .json 快取比對完畢，無需更新。");
+                    Log("[Phase A v2.8.1] .json 快取比對完畢，無需更新。");
                 }
 
                 ShowWarning("[DuckovCoreAPI] Mod 物品索引已就緒！");
             }
             catch (Exception e)
             {
-                ShowError($"[DuckovCoreAPI] 嚴重錯誤：\nPhase A (v2.8.0 遞迴掃描) 失敗！\n{e.Message}");
+                ShowError($"[DuckovCoreAPI] 嚴重錯誤：\nPhase A (v2.8.1 遞迴掃描) 失敗！\n{e.Message}");
             }
             finally
             {
@@ -728,7 +838,7 @@ ParseModFolder(string modFolderPath, bool isLocal)
                 ModInfoCopy infoCopy = ParseInfoIni(infoIniPath, modFolderPath);
                 if (string.IsNullOrEmpty(infoCopy.name))
                 {
-                    Log($"[Phase A v2.8.0] 警告: {infoIniPath} 缺少 'name' 欄位 (或 Parse 失敗)，跳過。");
+                    Log($"[Phase A v2.8.1] 警告: {infoIniPath} 缺少 'name' 欄位 (或 Parse 失敗)，跳過。");
                     return null;
                 }
 
@@ -767,7 +877,7 @@ ParseModFolder(string modFolderPath, bool isLocal)
             }
             catch (Exception e)
             {
-                Log($"[Phase A v2.8.0] 處理資料夾 {Path.GetFileName(modFolderPath)} 失敗: {e.Message}");
+                Log($"[Phase A v2.8.1] 處理資料夾 {Path.GetFileName(modFolderPath)} 失敗: {e.Message}");
                 return null;
             }
         }
@@ -799,7 +909,7 @@ ParseModFolder(string modFolderPath, bool isLocal)
             }
             catch (Exception e)
             {
-                Log($"[ParseInfoIni v2.8.0] 解析 {Path.GetFileName(iniPath)} 失敗: {e.Message}");
+                Log($"[ParseInfoIni v2.8.1] 解析 {Path.GetFileName(iniPath)} 失敗: {e.Message}");
             }
             // 如果沒有 displayName，就用 name
             if (string.IsNullOrEmpty(info.displayName))
@@ -871,9 +981,9 @@ ParseModFolder(string modFolderPath, bool isLocal)
                                             // 嘗試從多個欄位抓取物品 Key
 
                                             string?
-                      itemKey = item["LocalizationKey"]?.ToString() ??
-                                                                                    item["ItemName"]?.ToString() ??
-                                                                                    item["DisplayName"]?.ToString();
+                                            itemKey = item["LocalizationKey"]?.ToString() ??
+                                            item["ItemName"]?.ToString() ??
+                                            item["DisplayName"]?.ToString();
 
                                             if (itemKey != null)
                                             {
@@ -888,9 +998,9 @@ ParseModFolder(string modFolderPath, bool isLocal)
                                     else if (token is JObject obj)
                                     {
                                         string?
-itemKey = obj["LocalizationKey"]?.ToString() ??
-                                                          obj["ItemName"]?.ToString() ??
-                                                          obj["DisplayName"]?.ToString();
+                                        itemKey = obj["LocalizationKey"]?.ToString() ??
+                                        obj["ItemName"]?.ToString() ??
+                                        obj["DisplayName"]?.ToString();
 
                                         if (itemKey != null)
                                         {
@@ -959,7 +1069,13 @@ itemKey = obj["LocalizationKey"]?.ToString() ??
                 Log($"[DuckovCoreAPI] UI 緩衝區清空失敗: {e.Message}");
             }
 
-            if (isMerging) return;
+            // [v2.8.1 掃描修正] 檢查是否已掃描過
+            if (isMerging || hasScannedThisSession)
+            {
+                if (hasScannedThisSession) Log("Phase B (資料庫掃描) 已在本次遊戲中執行過，跳過。");
+                return; // 如果正在掃描，或已掃描過，就跳過
+            }
+
             if (instance != null)
             {
                 Log("Phase B (資料庫掃描) 啟動。");
@@ -997,7 +1113,7 @@ itemKey = obj["LocalizationKey"]?.ToString() ??
             }
             // 3. 等待遊戲的 `dynamicDic` 欄位被填入 (最多 90 秒)
             FieldInfo?
-field = AccessTools.Field(typeof(ItemAssetsCollection), "dynamicDic");
+            field = AccessTools.Field(typeof(ItemAssetsCollection), "dynamicDic");
             if (field == null)
             {
                 ShowError("[DuckovCoreAPI] 掃描 Part 2 發生致命錯誤：找不到 'dynamicDic' 欄位！CSI 失敗！");
@@ -1017,7 +1133,7 @@ field = AccessTools.Field(typeof(ItemAssetsCollection), "dynamicDic");
                 }
             }
             Dictionary<int, ItemAssetsCollection.DynamicEntry>?
-dynamicDatabase = dynamicDicValue as Dictionary<int, ItemAssetsCollection.DynamicEntry>;
+            dynamicDatabase = dynamicDicValue as Dictionary<int, ItemAssetsCollection.DynamicEntry>;
             if (dynamicDatabase == null)
             {
                 ShowError($"[DuckovCoreAPI] 掃描 Part 2 發生致命錯誤：等待 90 秒後 'dynamicDic' 還是 null！");
@@ -1043,7 +1159,7 @@ dynamicDatabase = dynamicDicValue as Dictionary<int, ItemAssetsCollection.Dynami
                 a_StackTrace_IgnoreList.Add("TeamSoda.Duckov.Core.dll");
             // --- Part 1: 掃描「遊戲本體」資料庫 (entries) ---
             List<ItemAssetsCollection.Entry>?
-baseGameEntries = null;
+            baseGameEntries = null;
             try
             {
                 baseGameEntries = ItemAssetsCollection.Instance.entries;
@@ -1077,10 +1193,10 @@ baseGameEntries = null;
             foreach (var kvp in dynamicDatabase)
             {
                 try
-
                 {
+
                     ItemAssetsCollection.DynamicEntry?
-entry = kvp.Value;
+                    entry = kvp.Value;
                     if (entry == null || entry.prefab == null) continue;
 
                     bool isJsonMod = ProcessItemPrefab_Json(entry.prefab, entry.typeID, "Mod");
@@ -1113,6 +1229,11 @@ entry = kvp.Value;
             int newItems = 0;
             int conflicts = 0;
 
+            // ==============================================================
+            // ▼▼▼建立一個 StringBuilder 來收集「所有」衝突日誌▼▼▼
+            // ==============================================================
+            StringBuilder conflictLogBuilder = new StringBuilder();
+
             // [v2.3.0] 如果 Mod 被移除 (forceLedgerRescan)，強制用 a_MasterLedger 覆蓋 a_SavedLedger
             if (forceLedgerRescan)
             {
@@ -1127,7 +1248,6 @@ entry = kvp.Value;
                 foreach (var kvp in a_MasterLedger)
                 {
                     if (!a_SavedLedger.ContainsKey(kvp.Key))
-
                     {
                         a_SavedLedger[kvp.Key] = kvp.Value;
                         newItems++;
@@ -1140,31 +1260,108 @@ entry = kvp.Value;
                         // [v2.2.2 修正] 檢查 Tag 和 Weight 是否有變化
                         if (existingEntry.BronzeID != newEntry.BronzeID ||
                             existingEntry.GoldenID != newEntry.GoldenID ||
-                            existingEntry.Description !=
-newEntry.Description ||
+                            existingEntry.Description != newEntry.Description ||
                             existingEntry.Weight != newEntry.Weight || // [v2.2.2] 檢查 Weight
                             !existingEntry.Tags.SequenceEqual(newEntry.Tags)) // 檢查 Tag
                         {
 
+
                             // [v2.3.0] 檢查「真實衝突」(Type 2/3 Mod 搶 ID)
                             if (existingEntry.GoldenID != "BaseGame" && !existingEntry.BronzeID.Contains("Type 1") &&
-
-                       newEntry.GoldenID != "BaseGame" && !newEntry.BronzeID.Contains("Type 1") &&
+                                newEntry.GoldenID != "BaseGame" && !newEntry.BronzeID.Contains("Type 1") &&
                                 newEntry.GoldenID != existingEntry.GoldenID)
                             {
 
                                 conflicts++;
-                                // 衝突！
-                                ShowError($"[DuckovCoreAPI] 偵測到 ID 衝突 (TypeID: {kvp.Key})！\n" +
-                                          $" - 舊 Mod: {existingEntry.BronzeID} (SteamID: {existingEntry.GoldenID})\n" +
 
-                                $" - 新 Mod: {newEntry.BronzeID} (SteamID: {newEntry.GoldenID})\n" +
-                                          $" - 策略：保留歷史紀錄 (舊 Mod)。");
+                                // ==================================================
+                                // ▼▼▼ UI 提示 開始 ▼▼▼
+                                // ==================================================
+                                string errorMsg = $"[DuckovCoreAPI] 偵測到物品ID衝突 (ID: {kvp.Key})！\n" +
+                                          $" - 舊 Mod: {existingEntry.BronzeID}\n" +
+                                          $" - 新 Mod: {newEntry.BronzeID}\n" +
+                                          $" - 詳情請見: 遊戲目錄/DuckovCore_Conflicts/DuckovCore_Conflict_Report.log";
+                                ShowError(errorMsg);
+                                // ==================================================
+                                // ▲▲▲ UI 提示 結束 ▲▲▲
+                                // ==================================================
+
+
+                                // ==================================================
+                                // ▼▼▼  抓蟲版 (日誌) ▼▼▼
+                                // ==================================================
+                                try
+                                {
+                                    // ==================================================
+                                    // ▼▼▼ 修正點 ▼▼▼
+                                    // 不再用 ItemNameKey 查詢 a_WorkshopCache 
+                                    // 改用已知的 GoldenID (Steam ID) 去反搜 a_WorkshopCache.Values
+                                    // ==================================================
+                                    string oldPath = "未知 (無法反查路徑)";
+                                    string newPath = "未知 (無法反查路徑)";
+
+                                    try
+                                    {
+                                        if (ulong.TryParse(existingEntry.GoldenID, out ulong oldGoldenId))
+                                        {
+                                            // 用 FirstOrDefault 搜尋 Cache 裡的值
+                                            ModInfoCopy? oldInfo = a_WorkshopCache.Values.FirstOrDefault(info => info.publishedFileId == oldGoldenId);
+                                            if (oldInfo != null) oldPath = oldInfo.Value.path;
+                                        }
+                                    }
+                                    catch { } // 忽略 (可能是 BaseGame 或 Type 1)
+
+                                    try
+                                    {
+                                        if (ulong.TryParse(newEntry.GoldenID, out ulong newGoldenId))
+                                        {
+                                            ModInfoCopy? newInfo = a_WorkshopCache.Values.FirstOrDefault(info => info.publishedFileId == newGoldenId);
+                                            if (newInfo != null) newPath = newInfo.Value.path;
+                                        }
+                                    }
+                                    catch { } // 忽略
+                                    // [ v2.8.2 修正] 把 ItemNameKey 換成 kvp.Key (衝突 ID)
+                                    string oldJsonFile = FindJsonSourceFile(oldPath, kvp.Key);
+                                    string newJsonFile = FindJsonSourceFile(newPath, kvp.Key); 
+                                    // ==================================================
+                                    // ▲▲▲ 修正點 結束 ▲▲▲
+                                    // ==================================================
+
+                                    // 2. 建立詳細說明 (鴨嘴獸風格)
+                                    conflictLogBuilder.AppendLine("--- 鴨嘴獸探員D (核心API) 衝突簡報 ---");
+                                    conflictLogBuilder.AppendLine($"截獲時間: {DateTime.Now}");
+                                    conflictLogBuilder.AppendLine($"衝突ID: {kvp.Key}");
+                                    conflictLogBuilder.AppendLine($"物品代號: {newEntry.ItemNameKey}");
+                                    conflictLogBuilder.AppendLine();
+                                    conflictLogBuilder.AppendLine("--- 肇事模組 (新來的) ---");
+                                    conflictLogBuilder.AppendLine($"模組名稱: {newEntry.BronzeID}");
+                                    conflictLogBuilder.AppendLine($"Steam ID: {newEntry.GoldenID}");
+                                    conflictLogBuilder.AppendLine($"DLL 檔案: {newEntry.SilverID}");
+                                    conflictLogBuilder.AppendLine($"來源 JSON: {newJsonFile}"); // <--- 把這行加進去
+                                    conflictLogBuilder.AppendLine($"模組路徑 (藏身處): {newPath}"); // V7 已修正
+                                    conflictLogBuilder.AppendLine();
+                                    conflictLogBuilder.AppendLine("--- 地頭蛇模組 (已保留) ---");
+                                    conflictLogBuilder.AppendLine($"模組名稱: {existingEntry.BronzeID}");
+                                    conflictLogBuilder.AppendLine($"Steam ID: {existingEntry.GoldenID}");
+                                    conflictLogBuilder.AppendLine($"DLL 檔案: {existingEntry.SilverID}");
+                                    conflictLogBuilder.AppendLine($"來源 JSON: {oldJsonFile}"); // <--- 把這行加進去
+                                    conflictLogBuilder.AppendLine($"模組路徑 (藏身處): {oldPath}"); // V7 已修正
+                                    conflictLogBuilder.AppendLine();
+                                    conflictLogBuilder.AppendLine("(探員D的策略): 保留「地頭蛇」的資料。那個「新來的」... 它的物品來源會被API忽略。 可可可。");
+                                    conflictLogBuilder.AppendLine("--------------------------------------------------");
+                                    conflictLogBuilder.AppendLine(); // 加個空白行
+                                }
+                                catch (Exception e_log)
+                                {
+                                    ShowError($"[DuckovCoreAPI] 收集衝突日誌時失敗！ (ID: {kvp.Key}): {e_log.Message}");
+                                }
+                                // ==================================================
+                                // ▲▲▲ 日誌功能結束 ▲▲▲
+                                // ==================================================
                             }
                             else
                             {
                                 // (非衝突：判定為 Type 1 -> Type 2/3 升級，或資料更新，安全覆蓋)
-
                                 a_SavedLedger[kvp.Key] = newEntry;
                                 isDirty_Saved = true;
                             }
@@ -1173,10 +1370,42 @@ newEntry.Description ||
                 }
             }
             catch (Exception e)
-
             {
                 ShowError($"[DuckovCoreAPI] 帳本合併時發生嚴重錯誤！\n{e.Message}");
             }
+
+            // ==================================================
+            // ▼▼▼迴圈結束後，寫入「單一」日誌檔 ▼▼▼
+            // ==================================================
+            try
+            {
+                // 1. 準備路徑
+                string logDir = Path.Combine(Directory.GetParent(Application.dataPath).FullName, "DuckovCore_Conflicts");
+                string logPath = Path.Combine(logDir, "DuckovCore_Conflict_Report.log");
+
+                if (conflictLogBuilder.Length > 0)
+                {
+                    // 2. 有衝突，建立資料夾並「覆蓋」檔案
+                    Directory.CreateDirectory(logDir);
+                    File.WriteAllText(logPath, conflictLogBuilder.ToString());
+                }
+                else
+                {
+                    // 3. 沒衝突，如果舊檔案還在，就「刪掉」它
+                    if (File.Exists(logPath))
+                    {
+                        File.Delete(logPath);
+                    }
+                }
+            }
+            catch (Exception e_file)
+            {
+                ShowError($"[DuckovCoreAPI] 寫入「單一衝突日誌檔」失敗: {e_file.Message}");
+            }
+            // ==================================================
+            // ▲▲▲ 修改的地方 ▲▲▲
+            // ==================================================
+
 
             // 6. [v1.0.0] 清理與儲存
             a_MasterLedger.Clear();
@@ -1210,11 +1439,14 @@ newEntry.Description ||
 
             // [v2.2.0] 儲存屬性帳本
             _ = SaveStatsEffectsLedgerAsync(a_StatsEffectsLedger, GetLedgerPath(STATS_FILENAME_SAVED));
+
             isMerging = false;
             isDatabaseReady = true; // 物品聖杯訊號！
             isStatsEffectsReady = true;
-            // [v2.2.0] 屬性聖杯訊號！
+            hasScannedThisSession = true; // [v2.8.1 掃描修正] 標記本此遊戲已掃描
+
             Log("Phase B 完畢！CSI 完畢！聖杯訊號 (isDatabaseReady & isStatsEffectsReady) 啟動！");
+
             // 7. [v1.3.0 核心] 啟動 Phase C (配方掃描)
             // 必須在 isDatabaseReady = true 之後，因為 Phase C 需要用 a_SavedLedger 查表
             yield return instance!.StartCoroutine(ScanCraftingFormulas());
@@ -1265,7 +1497,7 @@ newEntry.Description ||
                 newEntry.MaxStack = prefab.MaxStackCount;
                 newEntry.Weight = prefab.UnitSelfWeight; // [v2.2.2]
                 newEntry.Description = prefab.Description ??
-""; // [v1.2.0] 物品敘述
+                ""; // [v1.2.0] 物品敘述
             }
             catch (Exception e)
             {
@@ -1280,13 +1512,25 @@ newEntry.Description ||
                 a_MasterLedger[id] = newEntry;
             }
 
-            // 建立「反向索引」
-            if (newEntry.GoldenID != "Unknown" && !a_ReverseLedger_Golden.ContainsKey($"{newEntry.GoldenID}:{newEntry.ItemNameKey}"))
-                a_ReverseLedger_Golden[$"{newEntry.GoldenID}:{newEntry.ItemNameKey}"] = id;
-            if (newEntry.SilverID != "Unknown" && !newEntry.SilverID.StartsWith("ItemStatsSystem") && !a_ReverseLedger_Silver.ContainsKey($"{newEntry.SilverID}:{newEntry.ItemNameKey}"))
-                a_ReverseLedger_Silver[$"{newEntry.SilverID}:{newEntry.ItemNameKey}"] = id;
-            if (newEntry.BronzeID != "遊戲本體" && !a_ReverseLedger_Bronze.ContainsKey($"{newEntry.BronzeID}:{newEntry.ItemNameKey}"))
-                a_ReverseLedger_Bronze[$"{newEntry.BronzeID}:{newEntry.ItemNameKey}"] = id;
+            // [v2.8.1 JEI 修正] 建立「反向索引」 (支援同名稱多 ID)
+            if (newEntry.GoldenID != "Unknown")
+            {
+                string key = $"{newEntry.GoldenID}:{newEntry.ItemNameKey}";
+                if (!a_ReverseLedger_Golden.ContainsKey(key)) a_ReverseLedger_Golden[key] = new List<int>();
+                if (!a_ReverseLedger_Golden[key].Contains(id)) a_ReverseLedger_Golden[key].Add(id);
+            }
+            if (newEntry.SilverID != "Unknown" && !newEntry.SilverID.StartsWith("ItemStatsSystem"))
+            {
+                string key = $"{newEntry.SilverID}:{newEntry.ItemNameKey}";
+                if (!a_ReverseLedger_Silver.ContainsKey(key)) a_ReverseLedger_Silver[key] = new List<int>();
+                if (!a_ReverseLedger_Silver[key].Contains(id)) a_ReverseLedger_Silver[key].Add(id);
+            }
+            if (newEntry.BronzeID != "遊戲本體")
+            {
+                string key = $"{newEntry.BronzeID}:{newEntry.ItemNameKey}";
+                if (!a_ReverseLedger_Bronze.ContainsKey(key)) a_ReverseLedger_Bronze[key] = new List<int>();
+                if (!a_ReverseLedger_Bronze[key].Contains(id)) a_ReverseLedger_Bronze[key].Add(id);
+            }
             return true;
         }
 
@@ -1339,7 +1583,7 @@ dll_path_from_trace = null;
                     }
                     else
                     {
-                        Log($"[v1.1.7] Type 1 警告 (ID: {id}): V12 追蹤帳本 找不到 Key '{newEntry.ItemNameKey}'！ 降級為 V11 反射！(Path: { dll_path_from_trace})");
+                        Log($"[v1.1.7] Type 1 警告 (ID: {id}): V12 追蹤帳本 找不到 Key '{newEntry.ItemNameKey}'！ 降級為 V11 反射！(Path: {dll_path_from_trace})");
                     }
                 }
             }
@@ -1387,7 +1631,7 @@ dll_path_from_trace = null;
                 newEntry.MaxStack = prefab.MaxStackCount;
                 newEntry.Weight = prefab.UnitSelfWeight; // [v2.2.2]
                 newEntry.Description = prefab.Description ??
-""; // [v1.2.0] 物品敘述
+                ""; // [v1.2.0] 物品敘述
             }
             catch (Exception e)
             {
@@ -1398,18 +1642,114 @@ dll_path_from_trace = null;
 
             // 5. 存入「記憶體帳本」 
             a_MasterLedger[id] = newEntry;
-            // 6. 建立「反向索引」
-            if (newEntry.GoldenID != "Unknown" && !newEntry.GoldenID.Contains("No ModInfo") && !newEntry.GoldenID.Contains("Ghost Mod") && !newEntry.GoldenID.Contains("Type 1") && !a_ReverseLedger_Golden.ContainsKey($"{newEntry.GoldenID}:{newEntry.ItemNameKey}"))
-                a_ReverseLedger_Golden[$"{newEntry.GoldenID}:{newEntry.ItemNameKey}"] = id;
-            if (newEntry.SilverID != "Unknown" && newEntry.SilverID != "BaseGame" && !newEntry.SilverID.StartsWith("ItemStatsSystem") && !newEntry.SilverID.Contains("(Clone)") && !a_ReverseLedger_Silver.ContainsKey($"{newEntry.SilverID}:{newEntry.ItemNameKey}"))
-                a_ReverseLedger_Silver[$"{newEntry.SilverID}:{newEntry.ItemNameKey}"] = id;
-            if (newEntry.BronzeID != "遊戲本體" && !newEntry.BronzeID.Contains("No ModInfo") && !newEntry.BronzeID.Contains("Ghost Mod") && !newEntry.BronzeID.Contains("Type 1") && !a_ReverseLedger_Bronze.ContainsKey($"{newEntry.BronzeID}:{newEntry.ItemNameKey}"))
-                a_ReverseLedger_Bronze[$"{newEntry.BronzeID}:{newEntry.ItemNameKey}"] = id;
+
+            // 6. [v2.8.1 JEI 修正] 建立「反向索引」 (支援同名稱多 ID)
+            if (newEntry.GoldenID != "Unknown" && !newEntry.GoldenID.Contains("No ModInfo") && !newEntry.GoldenID.Contains("Ghost Mod") && !newEntry.GoldenID.Contains("Type 1"))
+            {
+                string key = $"{newEntry.GoldenID}:{newEntry.ItemNameKey}";
+                if (!a_ReverseLedger_Golden.ContainsKey(key)) a_ReverseLedger_Golden[key] = new List<int>();
+                if (!a_ReverseLedger_Golden[key].Contains(id)) a_ReverseLedger_Golden[key].Add(id);
+            }
+            if (newEntry.SilverID != "Unknown" && newEntry.SilverID != "BaseGame" && !newEntry.SilverID.StartsWith("ItemStatsSystem") && !newEntry.SilverID.Contains("(Clone)"))
+            {
+                string key = $"{newEntry.SilverID}:{newEntry.ItemNameKey}";
+                if (!a_ReverseLedger_Silver.ContainsKey(key)) a_ReverseLedger_Silver[key] = new List<int>();
+                if (!a_ReverseLedger_Silver[key].Contains(id)) a_ReverseLedger_Silver[key].Add(id);
+            }
+            if (newEntry.BronzeID != "遊戲本體" && !newEntry.BronzeID.Contains("No ModInfo") && !newEntry.BronzeID.Contains("Ghost Mod") && !newEntry.BronzeID.Contains("Type 1"))
+            {
+                string key = $"{newEntry.BronzeID}:{newEntry.ItemNameKey}";
+                if (!a_ReverseLedger_Bronze.ContainsKey(key)) a_ReverseLedger_Bronze[key] = new List<int>();
+                if (!a_ReverseLedger_Bronze[key].Contains(id)) a_ReverseLedger_Bronze[key].Add(id);
+            }
         }
 
         // ==================================================
         // [Phase C] 配方掃描 (v1.3.3)
         // ==================================================
+        /// <summary>
+        /// [新增] 輔助函數：在指定的 Mod 路徑中，反向搜尋是哪個 .json 檔案定義了
+        /// </summary>
+        /// <param name="modPath">Mod 的根目錄 (e.g., ".../3167020/123456")</param>
+        /// <param name="itemKey">要尋找的物品 Key (e.g., "accessory.sliencer001")</param>
+        /// <param name="conflictTypeId">要尋找的衝突 TypeID (e.g., 78045)</param>
+        /// <returns>JSON 檔案名稱 (e.g., "guns.json")，或 "N/A (JSON)"</returns>
+        /// <summary>
+        /// [v2.8.2 修正] 輔助函數：在指定的 Mod 路徑中，反向搜尋是哪個 .json 檔案定義了
+        /// </summary>
+        /// <param name="modPath">Mod 的根目錄 (e.g., ".../3167020/123456")</param>
+        /// <param name="conflictTypeId">要尋找的衝突 TypeID (e.g., 78045)</param>
+        /// <returns>JSON 檔案名稱 (e.g., "guns.json")，或 "N/A (JSON)"</returns>
+        private static string FindJsonSourceFile(string modPath, int conflictTypeId)
+        {
+            // (只查 JSON，所以如果路徑是 Type 1 或 BaseGame，就直接回傳)
+            if (modPath.Contains("Type 1") || modPath.Contains("BaseGame") || modPath.Contains("未知"))
+            {
+                return "N/A (Type 1 / DLL)";
+            }
+
+            try
+            {
+                if (!Directory.Exists(modPath)) return "N/A (路徑無效)";
+
+                // 使用遞迴掃描
+                var jsonFiles = Directory.GetFiles(modPath, "*.json", SearchOption.AllDirectories);
+                if (jsonFiles.Length == 0) return "N/A (找不到JSON)";
+
+                // 【 v2.8.2 修正】把要找的 ID 轉成字串，方便比對
+                string conflictIdStr = conflictTypeId.ToString();
+
+                foreach (string jsonFile in jsonFiles)
+                {
+                    try
+                    {
+                        string jsonText = File.ReadAllText(jsonFile);
+                        string cleanedJsonText = Regex.Replace(jsonText, @"^\s*//.*$", "", RegexOptions.Multiline);
+                        JToken token = JToken.Parse(cleanedJsonText);
+
+                        if (token is JArray array)
+                        {
+                            foreach (var item in array)
+                            {
+                                // 【 v2.8.3 】
+                                // 檢查 NewItemId, id, TypeID 
+                                string? newId = item["NewItemId"]?.ToString() ??
+                                                item["id"]?.ToString() ??
+                                                item["TypeID"]?.ToString();
+                                if (newId == conflictIdStr)
+                                {
+                                    return Path.GetFileName(jsonFile); // 找到了！
+                                }
+                            }
+                        }
+                        else if (token is JObject obj)
+                        {
+                            // 【v2.8.3 】
+                            // 檢查 NewItemId, id, TypeID
+                            string? newId = obj["NewItemId"]?.ToString() ??
+                                            obj["id"]?.ToString() ??
+                                            obj["TypeID"]?.ToString();
+                            if (newId == conflictIdStr)
+                            {
+                                return Path.GetFileName(jsonFile); // 找到了！
+                            }
+                        }
+
+                    }
+                    catch (Exception)// (忽略壞掉的 JSON)
+                    {
+                    
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"N/A (搜尋失敗: {ex.Message})";
+            }
+
+            return "N/A (JSON中未找到)";
+        }
+
 
         /// <summary>
         /// [v1.3.7] Phase C: 掃描所有「製作配方」
@@ -2050,6 +2390,7 @@ stringValue,
         public static void ShowError(string message, float duration = 10f)
         {
             UnityEngine.Debug.LogError($"[DuckovCoreAPI] {message}");
+            if (!showUIMessages) return; // [v2.8.1 ModSetting]
             if (!isUIReady)
             {
                 // [v2.8.1 修正] 修正參數順序
@@ -2070,6 +2411,7 @@ stringValue,
         public static void ShowWarning(string message, float duration = 10f)
         {
             UnityEngine.Debug.LogWarning($"[DuckovCoreAPI] {message}");
+            if (!showUIMessages) return; // [v2.8.1 ModSetting]
             if (!isUIReady)
             {
                 // [v2.8.1 修正] 修正參數順序
@@ -2100,7 +2442,6 @@ stringValue,
             foreach (var (msg, timestamp, isError, duration) in ModBehaviour.uiMessageQueue_v2)
             {
                 AddMessage(msg, isError, duration, timestamp);
-                // 
             }
             ModBehaviour.uiMessageQueue_v2.Clear();
         }
@@ -2111,7 +2452,6 @@ stringValue,
             if (ModBehaviour.instance != null)
             {
                 // [v2.5.1] 
-
                 activeMessages_v2.Add((message, (startTime == -1f) ? Time.time : startTime, isError, duration));
             }
             else
@@ -2121,13 +2461,19 @@ stringValue,
             }
         }
 
+        /// <summary>
+        ///  重新設計 OnGUI，讓錯誤訊息永遠在最下面
+        /// </summary>
         void OnGUI()
         {
-            if (activeMessages_v2.Count == 0) return;
-            // [v2.4.0] 
+            // [v2.8.1 ModSetting]
+            if (activeMessages_v2.Count == 0 || !ModBehaviour.showUIMessages) return;
+
+            // 清理過期的訊息
             activeMessages_v2.RemoveAll(msg => Time.time - msg.timestamp > msg.duration);
             if (activeMessages_v2.Count == 0) return;
 
+            // --- 樣式設定 ---
             float yPos = Screen.height - 40;
             GUIStyle style = new GUIStyle(GUI.skin.label);
             style.alignment = TextAnchor.MiddleLeft;
@@ -2138,42 +2484,94 @@ stringValue,
             shadowStyle.normal.textColor = Color.black;
             shadowStyle.alignment = TextAnchor.MiddleLeft;
             shadowStyle.richText = true;
-            int count = 0;
+
+            float maxWidth = Screen.width / 1.5f;
+
+            // ==================================================
+            // ▼▼▼  優先權繪製 ▼▼▼
+            // ==================================================
+
+            // --- Pass 1: 先畫「普通訊息」 (isError == false) ---
+            // 這些訊息會被 Pass 2 的錯誤訊息往上推
             for (int i = activeMessages_v2.Count - 1; i >= 0; i--)
             {
-                if (count >= 5) break;
-                try
-                {
-                    var (message, timestamp, isError, duration) = activeMessages_v2[i];
-                    // [v2.4.0] 
-                    float alpha = 1.0f;
-                    float timeRemaining = (timestamp + duration) - Time.time;
-                    if (timeRemaining < 1.0f) // 
-                    {
-                        alpha = Mathf.Clamp01(timeRemaining);
-                    }
+                var msgData = activeMessages_v2[i];
+                if (msgData.isError) continue; // 跳過錯誤
 
-                    if (alpha <= 0) continue;
-                    if (isError)
-                    {
-                        style.normal.textColor = new Color(1, 0.6f, 0.6f, alpha);
-                    }
-                    else
-                    {
-                        style.normal.textColor = new Color(1, 1, 1, alpha);
-                    }
-                    shadowStyle.normal.textColor = new Color(0, 0, 0, alpha);
-                    Rect rect = new Rect(12, yPos - 35, Screen.width / 1.5f, 40);
-                    GUI.Label(new Rect(rect.x + 1, rect.y + 1, rect.width, rect.height), message, shadowStyle);
-                    GUI.Label(rect, message, style);
+                // 呼叫繪圖助手，如果超出螢幕頂端就停止
+                if (!DrawMessage(msgData, ref yPos, style, shadowStyle, maxWidth))
+                    break;
+            }
 
-                    yPos -= 35;
-                    count++;
-                }
-                catch (Exception e)
+            // --- Pass 2: 再畫「錯誤訊息」 (isError == true) ---
+            // 這些訊息會永遠顯示在最底部
+            for (int i = activeMessages_v2.Count - 1; i >= 0; i--)
+            {
+                var msgData = activeMessages_v2[i];
+                if (!msgData.isError) continue; // 跳過普通訊息
+
+                // 呼叫繪圖助手，如果超出螢幕頂端就停止
+                if (!DrawMessage(msgData, ref yPos, style, shadowStyle, maxWidth))
+                    break;
+            }
+            // ==================================================
+            // ▲▲▲   結束 ▲▲▲
+            // ==================================================
+        }
+
+        /// <summary>
+        ///  新增：繪圖助手，用來畫單條訊息並更新 yPos
+        /// </summary>
+        /// <returns>如果超出螢幕頂端，回傳 false</returns>
+        private bool DrawMessage((string message, float timestamp, bool isError, float duration) msgData, ref float yPos, GUIStyle style, GUIStyle shadowStyle, float maxWidth)
+        {
+            try
+            {
+                var (message, timestamp, isError, duration) = msgData;
+
+                // 處理淡出
+                float alpha = 1.0f;
+                float timeRemaining = (timestamp + duration) - Time.time;
+                if (timeRemaining < 1.0f)
                 {
-                    UnityEngine.Debug.LogError($"[DuckovCoreAPI] OnGUI 繪製時發生錯誤: {e.Message}");
+                    alpha = Mathf.Clamp01(timeRemaining);
                 }
+                if (alpha <= 0) return true; // 繼續迴圈 (但不要畫)
+
+                // 設定顏色
+                if (isError)
+                {
+                    style.normal.textColor = new Color(1, 0.6f, 0.6f, alpha);
+                }
+                else
+                {
+                    style.normal.textColor = new Color(1, 1, 1, alpha);
+                }
+                shadowStyle.normal.textColor = new Color(0, 0, 0, alpha);
+
+                // 動態計算訊息高度
+                GUIContent content = new GUIContent(message);
+                float messageHeight = style.CalcHeight(content, maxWidth);
+
+                // 動態設定 Rect
+                Rect rect = new Rect(12, yPos - messageHeight, maxWidth, messageHeight);
+
+                // 螢幕頂端限制
+                if (rect.y < 0) return false; // 停止迴圈 (超出螢幕了)
+
+                // 畫出陰影和文字
+                GUI.Label(new Rect(rect.x + 1, rect.y + 1, rect.width, rect.height), message, shadowStyle);
+                GUI.Label(rect, message, style);
+
+                // 動態更新 yPos
+                yPos -= (messageHeight + 5);
+
+                return true; // 繼續迴Loop
+            }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogError($"[DuckovCoreAPI] OnGUI 繪製時發生錯誤: {e.Message}");
+                return true; // 發生錯誤也要繼續迴圈
             }
         }
     }
@@ -2240,6 +2638,7 @@ method = frame.GetMethod();
 
     // ==================================================
     // [v2.2.1] API 公開函數 (Public API)
+    // [v2.8.1] JEI 修正
     // ==================================================
     public partial class ModBehaviour
     {
@@ -2308,6 +2707,7 @@ method = frame.GetMethod();
 
         /// <summary>
         /// [API v1.0.0] (反向查詢) 透過 Mod 的 Steam ID (GoldenID) 和物品的 ItemNameKey 取得 TypeID。
+        /// [v2.8.1 修正]：此函數僅回傳第一個相符的 ID。如需所有 ID，請使用 GetTypeIDs。
         /// </summary>
         /// <param name="goldenID">Mod 的 Steam ID (e.g., "283748374")</param>
         /// <param name="itemNameKey">物品的 ItemNameKey (e.g., "accessory.sliencer001")</param>
@@ -2316,16 +2716,44 @@ method = frame.GetMethod();
         public static bool GetTypeID(string
 goldenID, string itemNameKey, out int typeID)
         {
-            if (!isDatabaseReady)
+            typeID = -1;
+            if (!isDatabaseReady) return false;
+
+            if (a_ReverseLedger_Golden.TryGetValue($"{goldenID}:{itemNameKey}", out List<int> ids) && ids.Count > 0)
             {
-                typeID = -1;
-                return false;
+                typeID = ids[0];
+                return true;
             }
-            return a_ReverseLedger_Golden.TryGetValue($"{goldenID}:{itemNameKey}", out typeID);
+            return false;
         }
 
         /// <summary>
+        /// [API v2.8.1 新增] (反向查詢) 透過 Mod 的 Steam ID (GoldenID) 和物品的 ItemNameKey 取得「所有」相符的 TypeID 列表。
+        /// </summary>
+        /// <param name="goldenID">Mod 的 Steam ID</param>
+        /// <param name="itemNameKey">物品的 ItemNameKey</param>
+        /// <param name="typeIDs">成功時，回傳的 TypeID 列表</param>
+        /// <returns>如果成功在反向索引中找到該組合則回傳 true</returns>
+        public static bool GetTypeIDs(string goldenID, string itemNameKey, out List<int> typeIDs)
+        {
+            if (!isDatabaseReady)
+            {
+                typeIDs = new List<int>();
+                return false;
+            }
+            if (a_ReverseLedger_Golden.TryGetValue($"{goldenID}:{itemNameKey}", out List<int> ids))
+            {
+                typeIDs = new List<int>(ids); // 回傳副本
+                return true;
+            }
+            typeIDs = new List<int>();
+            return false;
+        }
+
+
+        /// <summary>
         /// [API v1.0.0] (反向查詢) 透過 Mod 的 DLL 名稱 (SilverID) 和物品的 ItemNameKey 取得 TypeID。
+        /// [v2.8.1 修正]：此函數僅回傳第一個相符的 ID。如需所有 ID，請使用 GetTypeIDsBySilver。
         /// </summary>
         /// <param name="silverID">Mod 的 DLL 名稱 (e.g., "GunsGalore.dll")</param>
         /// <param name="itemNameKey">物品的 ItemNameKey (e.g., "accessory.sliencer001")</param>
@@ -2334,31 +2762,83 @@ goldenID, string itemNameKey, out int typeID)
         public static bool GetTypeIDBySilver(string
 silverID, string itemNameKey, out int typeID)
         {
+            typeID = -1;
+            if (!isDatabaseReady) return false;
+
+            if (a_ReverseLedger_Silver.TryGetValue($"{silverID}:{itemNameKey}", out List<int> ids) && ids.Count > 0)
+            {
+                typeID = ids[0];
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// [API v2.8.1 新增] (反向查詢) 透過 Mod 的 DLL 名稱 (SilverID) 和物品的 ItemNameKey 取得「所有」相符的 TypeID 列表。
+        /// </summary>
+        /// <param name="silverID">Mod 的 DLL 名稱</param>
+        /// <param name="itemNameKey">物品的 ItemNameKey</param>
+        /// <param name="typeIDs">成功時，回傳的 TypeID 列表</param>
+        /// <returns>如果成功在反向索引中找到該組合則回傳 true</returns>
+        public static bool GetTypeIDsBySilver(string silverID, string itemNameKey, out List<int> typeIDs)
+        {
             if (!isDatabaseReady)
             {
-                typeID = -1;
+                typeIDs = new List<int>();
                 return false;
             }
-            return a_ReverseLedger_Silver.TryGetValue($"{silverID}:{itemNameKey}", out typeID);
+            if (a_ReverseLedger_Silver.TryGetValue($"{silverID}:{itemNameKey}", out List<int> ids))
+            {
+                typeIDs = new List<int>(ids); // 回傳副本
+                return true;
+            }
+            typeIDs = new List<int>();
+            return false;
         }
 
         /// <summary>
         /// [API v1.0.0] (反向查詢) 透過 Mod 的顯示名稱 (BronzeID) 和物品的 ItemNameKey 取得 TypeID。
         /// (注意：顯示名稱可能重複，不保證準確)
+        /// [v2.8.1 修正]：此函數僅回傳第一個相符的 ID。如需所有 ID，請使用 GetTypeIDsByBronze。
         /// </summary>
         /// <param name="bronzeID">Mod 的顯示名稱 (e.g., "Guns Galore Mod")</param>
         /// <param name="itemNameKey">物品的 ItemNameKey (e.g., "accessory.sliencer001")</param>
         /// <param name="typeID">成功時，回傳的 TypeID</param>
         /// <returns>如果成功在反向索引中找到該組合則回傳 true</returns>
-
         public static bool GetTypeIDByBronze(string bronzeID, string itemNameKey, out int typeID)
+        {
+            typeID = -1;
+            if (!isDatabaseReady) return false;
+
+            if (a_ReverseLedger_Bronze.TryGetValue($"{bronzeID}:{itemNameKey}", out List<int> ids) && ids.Count > 0)
+            {
+                typeID = ids[0];
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// [API v2.8.1 新增] (反向查詢) 透過 Mod 的顯示名稱 (BronzeID) 和物品的 ItemNameKey 取得「所有」相符的 TypeID 列表。
+        /// </summary>
+        /// <param name="bronzeID">Mod 的顯示名稱</param>
+        /// <param name="itemNameKey">物品的 ItemNameKey</param>
+        /// <param name="typeIDs">成功時，回傳的 TypeID 列表</param>
+        /// <returns>如果成功在反向索引中找到該組合則回傳 true</returns>
+        public static bool GetTypeIDsByBronze(string bronzeID, string itemNameKey, out List<int> typeIDs)
         {
             if (!isDatabaseReady)
             {
-                typeID = -1;
+                typeIDs = new List<int>();
                 return false;
             }
-            return a_ReverseLedger_Bronze.TryGetValue($"{bronzeID}:{itemNameKey}", out typeID);
+            if (a_ReverseLedger_Bronze.TryGetValue($"{bronzeID}:{itemNameKey}", out List<int> ids))
+            {
+                typeIDs = new List<int>(ids); // 回傳副本
+                return true;
+            }
+            typeIDs = new List<int>();
+            return false;
         }
 
         /// <summary>
@@ -2414,5 +2894,104 @@ silverID, string itemNameKey, out int typeID)
         {
             return new Dictionary<int, StatsAndEffectsEntry>(a_StatsEffectsLedger);
         }
-    }
+        
+        /// <summary>
+        /// [API v3.0.0 最終版] (由 ModSetting 按鈕呼叫)
+        /// 強制刪除快取 (智慧型按鈕)
+        /// </summary>
+        public static void ClearAllCachesAndNotify()
+        {
+            Log("收到「v3.0.0 Pro 級清除快取」請求...");
+            int deleteCount = 0;
+            
+            // --- 1. 檢查玩家在哪裡 ---
+            bool isInWorld = false; 
+            try
+            {
+                // 遊戲世界的 GameClock.Instance 絕對不會是 null
+                if (GameClock.Instance != null) 
+                {
+                    isInWorld = true;
+                }
+            }
+            catch {} // (忽略錯誤)
+
+            // --- 2. [共通] 刪除「硬碟」快取 ---
+            try
+            {
+                Log("--- 正在清除 [硬碟] 快取 ---");
+                string[] cacheFiles = {
+                    LEDGER_FILENAME_SAVED,
+                    RECIPE_FILENAME_SAVED,
+                    STATS_FILENAME_SAVED,
+                    WORKSHOP_CACHE_FILENAME
+                };
+                
+                foreach (string filename in cacheFiles)
+                {
+                    string path = GetLedgerPath(filename);
+                    if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                        Log($"[ClearCache] 成功刪除硬碟快取: {filename}");
+                        deleteCount++;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                ShowError($"【API 快取】\n刪除「硬碟」快取時發生嚴重錯誤！\n{e.Message}", 15f);
+                return;
+            }
+
+            // --- 3. [智慧型] 根據地點決定下一步 ---
+            if (isInWorld)
+            {
+                // 【情境 A：在遊戲世界】(v2.8.5 笨蛋模式)
+                Log("[ClearCache] 偵測到玩家在遊戲世界中！");
+                ShowError("【API 快取已清除！】\n(偵測到您在世界中)\n請【立刻重啟遊戲】(Quit Game)！\n(API 將在下次啟動時強制重新掃描)", 30f);
+            }
+            else
+            {
+                // 【情境 B：在主選單】(v2.9.0 模式)
+                Log("[ClearCache] 偵測到玩家在主選單！正在執行「熱重載」...");
+                try
+                {
+                    Log("--- 正在清除 [記憶體] 快取 ---");
+                    a_WorkshopCache.Clear();
+                    a_SavedLedger.Clear();
+                    a_RecipeLedger.Clear();
+                    a_StatsEffectsLedger.Clear();
+                    a_ReverseLedger_Golden.Clear();
+                    a_ReverseLedger_Silver.Clear();
+                    a_ReverseLedger_Bronze.Clear();
+                    a_Type1_Source_Map.Clear(); 
+                    a_ModInfo_By_DLL_Path.Clear(); 
+
+                    isWorkshopCacheBuilt = false;
+                    isLedgerReady_Saved = false; 
+                    isRecipeReady = false;
+                    isStatsEffectsReady = false;
+                    hasScannedThisSession = false;
+
+                    if (instance != null)
+                    {
+                        Log("[ClearCache] 正在手動觸發 Phase A (Workshop 掃描) 熱重載...");
+                        // 【v3.0.0 修正】 必須明確告訴 StartCoroutine 是 *哪一個* instance 的協程
+                        instance.StartCoroutine(instance.InitializePhaseA_Coroutine());
+                    }
+                    Log("[ClearCache] 正在手動觸發 (硬碟) 帳本 熱重載...");
+                    LoadLedgerAsync();
+                    LoadRecipeLedgerAsync();
+                    LoadStatsEffectsLedgerAsync();
+                    Log("[ClearCache] 記憶體快取已全部清空！");
+                    ShowWarning("【API 快取已清除！】\n(熱重載成功！)\n你現在可以【直接進入世界】(API 將會強制重新掃描)。", 20f);
+                }
+                catch (Exception e)
+                {
+                    ShowError($"【API 快...】\n清除「記憶體」快取時發生嚴重錯誤！\n{e.Message}\n你可能還是需要重啟遊戲...", 20f);
+                }
+            }
+        }
+     }
 }
